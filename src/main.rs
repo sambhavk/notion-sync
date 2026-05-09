@@ -19,7 +19,15 @@ async fn main() {
     }
     let root = PathBuf::from(&args[1]);
     let root_notion_page = &args[2];
-    let state_path = root.join(".notion_sync_state.json");
+
+    // state file always lives inside the notion_sync project dir (3 levels up from binary)
+    // binary: notion_sync/target/release/notion_sync → notion_sync/
+    let state_path = std::env::current_exe()
+        .expect("cannot resolve binary path")
+        .parent().expect("no parent").to_path_buf() // target/release/
+        .parent().expect("no parent").to_path_buf() // target/
+        .parent().expect("no parent").to_path_buf() // notion_sync/
+        .join(".sync_state.json");
 
     let client = NotionClient::new();
     let mut st = state::load(&state_path);
