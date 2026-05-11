@@ -434,7 +434,13 @@ fn parse_inline(text: &str) -> Vec<Value> {
                         let link_text: String = chars[start..start + close].iter().collect();
                         let url: String = chars[after + 1..after + 1 + url_end].iter().collect();
                         flush!();
-                        spans.push(Span { content: link_text, href: Some(url), ..Default::default() }.to_json());
+                        // Notion only accepts http/https URLs — render local/relative links as plain text
+                        let href = if url.starts_with("http://") || url.starts_with("https://") {
+                            Some(url)
+                        } else {
+                            None
+                        };
+                        spans.push(Span { content: link_text, href, ..Default::default() }.to_json());
                         i = after + 1 + url_end + 1;
                         continue;
                     }
