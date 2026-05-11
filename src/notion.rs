@@ -158,17 +158,25 @@ impl NotionClient {
         let upload_url = meta["upload_url"].as_str()?.to_string();
         let file_id    = meta["id"].as_str()?.to_string();
 
-        // Step 2 — PUT binary to the signed S3 URL (no Notion auth)
-        let put_resp = self.client
-            .put(&upload_url)
-            .header("Content-Type", content_type)
-            .body(bytes)
+        // Step 2 — POST multipart to the /send endpoint (Notion API, needs auth)
+        let part = reqwest::multipart::Part::bytes(bytes)
+            .file_name(name.clone())
+            .mime_str(content_type)
+            .ok()?;
+        let form = reqwest::multipart::Form::new().part("file", part);
+
+        let send_resp = self.client
+            .post(&upload_url)
+            .header("Authorization", format!("Bearer {token}"))
+            .header("Notion-Version", NOTION_VERSION)
+            .multipart(form)
             .send()
             .await
             .ok()?;
 
-        if !put_resp.status().is_success() {
-            eprintln!("Image PUT failed ({})", put_resp.status());
+        if !send_resp.status().is_success() {
+            let body = send_resp.text().await.unwrap_or_default();
+            eprintln!("Image upload /send failed: {body}");
             return None;
         }
 
