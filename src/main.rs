@@ -134,39 +134,58 @@ async fn main() {
 
     // sync files
     for (rel, abs) in &disk_files {
-        let content = match std::fs::read_to_string(abs) {
-            Ok(c) => c,
-            Err(e) => {
-                eprintln!("Cannot read {rel}: {e}");
-                continue;
-            }
-        };
-        let hash = sha256(&content);
+        if is_image(abs) {
+            let bytes = match std::fs::read(abs) {
+                Ok(b) => b,
+                Err(e) => { eprintln!("Cannot read {rel}: {e}"); continue; }
+            };
+            let hash = sha256_bytes(&bytes);
+            let title = abs.file_name().unwrap_or_default().to_string_lossy().to_string();
 
-        if let Some(entry) = st.files.get(rel) {
-            if entry.hash == hash {
-                println!("Unchanged: {rel}");
-                continue;
+            if let Some(entry) = st.files.get(rel) {
+                if entry.hash == hash {
+                    println!("Unchanged: {rel}");
+                    continue;
+                }
+                println!("Updating image: {rel}");
+                client.clear_page(&entry.page_id).await;
+                let block = make_image_block(&client, abs, &title).await;
+                client.append_blocks(&entry.page_id, vec![block]).await;
+                st.files.get_mut(rel).unwrap().hash = hash;
+            } else {
+                let parent_id = parent_notion_id(rel, &st, root_notion_page);
+                println!("Creating image page: {rel}");
+                let page_id = client.create_page(&parent_id, &title).await;
+                let block = make_image_block(&client, abs, &title).await;
+                client.append_blocks(&page_id, vec![block]).await;
+                st.files.insert(rel.clone(), FileEntry { page_id, hash });
             }
-            // update
-            println!("Updating: {rel}");
-            client.clear_page(&entry.page_id).await;
-            let blocks = render_file(abs, &content);
-            client.append_blocks(&entry.page_id, blocks).await;
-            st.files.get_mut(rel).unwrap().hash = hash;
         } else {
-            // create
-            let parent_id = parent_notion_id(rel, &st, root_notion_page);
-            let title = abs
-                .file_name()
-                .unwrap_or_default()
-                .to_string_lossy()
-                .to_string();
-            println!("Creating file page: {rel}");
-            let page_id = client.create_page(&parent_id, &title).await;
-            let blocks = render_file(abs, &content);
-            client.append_blocks(&page_id, blocks).await;
-            st.files.insert(rel.clone(), FileEntry { page_id, hash });
+            let content = match std::fs::read_to_string(abs) {
+                Ok(c) => c,
+                Err(e) => { eprintln!("Cannot read {rel}: {e}"); continue; }
+            };
+            let hash = sha256(&content);
+
+            if let Some(entry) = st.files.get(rel) {
+                if entry.hash == hash {
+                    println!("Unchanged: {rel}");
+                    continue;
+                }
+                println!("Updating: {rel}");
+                client.clear_page(&entry.page_id).await;
+                let blocks = render_file(abs, &content);
+                client.append_blocks(&entry.page_id, blocks).await;
+                st.files.get_mut(rel).unwrap().hash = hash;
+            } else {
+                let parent_id = parent_notion_id(rel, &st, root_notion_page);
+                let title = abs.file_name().unwrap_or_default().to_string_lossy().to_string();
+                println!("Creating file page: {rel}");
+                let page_id = client.create_page(&parent_id, &title).await;
+                let blocks = render_file(abs, &content);
+                client.append_blocks(&page_id, blocks).await;
+                st.files.insert(rel.clone(), FileEntry { page_id, hash });
+            }
         }
     }
 
@@ -175,8 +194,23 @@ async fn main() {
 }
 
 fn is_supported(path: &Path) -> bool {
-    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-    name.ends_with(".md") || name.ends_with(".md.yaml")
+    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("").to_lowercase();
+    name.ends_with(".md")
+        || name.ends_with(".md.yaml")
+        || name.ends_with(".png")
+        || name.ends_with(".jpg")
+        || name.ends_with(".jpeg")
+        || name.ends_with(".gif")
+        || name.ends_with(".webp")
+}
+
+fn is_image(path: &Path) -> bool {
+    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("").to_lowercase();
+    name.ends_with(".png")
+        || name.ends_with(".jpg")
+        || name.ends_with(".jpeg")
+        || name.ends_with(".gif")
+        || name.ends_with(".webp")
 }
 
 fn render_file(path: &Path, content: &str) -> Vec<serde_json::Value> {
@@ -210,7 +244,32 @@ fn to_rel(root: &Path, abs: &Path) -> String {
 }
 
 fn sha256(content: &str) -> String {
+    sha256_bytes(content.as_bytes())
+}
+
+fn sha256_bytes(data: &[u8]) -> String {
     let mut hasher = Sha256::new();
-    hasher.update(content.as_bytes());
+    hasher.update(data);
     hex::encode(hasher.finalize())
+}
+
+async fn make_image_block(client: &NotionClient, path: &Path, name: &str) -> serde_json::Value {
+    match client.upload_image(path).await {
+        Some(file_id) => serde_json::json!({
+            "type": "image",
+            "image": {
+                "type": "file_upload",
+                "file_upload": { "id": file_id }
+            }
+        }),
+        None => {
+            eprintln!("Image upload failed for {name}, inserting placeholder");
+            serde_json::json!({
+                "type": "paragraph",
+                "paragraph": {
+                    "rich_text": [{ "type": "text", "text": { "content": format!("[Image: {name} — upload failed]") } }]
+                }
+            })
+        }
+    }
 }

@@ -1,5 +1,6 @@
 use reqwest::Client;
 use serde_json::{json, Value};
+use std::path::Path;
 use std::time::Duration;
 use tokio::time::sleep;
 
@@ -116,5 +117,62 @@ impl NotionClient {
         let url = format!("{BASE}/pages/{page_id}");
         let body = json!({ "archived": true });
         self.request(reqwest::Method::PATCH, &url, Some(body)).await;
+    }
+
+    // Returns the file_upload ID on success, None on any failure.
+    pub async fn upload_image(&self, path: &Path) -> Option<String> {
+        let name = path.file_name()?.to_string_lossy().to_string();
+        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
+        let content_type = match ext.as_str() {
+            "jpg" | "jpeg" => "image/jpeg",
+            "png"          => "image/png",
+            "gif"          => "image/gif",
+            "webp"         => "image/webp",
+            _              => return None,
+        };
+
+        let bytes = match std::fs::read(path) {
+            Ok(b) => b,
+            Err(e) => { eprintln!("Cannot read image {name}: {e}"); return None; }
+        };
+
+        let token = std::env::var("NOTION_TOKEN").ok()?;
+
+        // Step 1 — create the file upload slot
+        let create_resp = self.client
+            .post(format!("{BASE}/file_uploads"))
+            .header("Authorization", format!("Bearer {token}"))
+            .header("Notion-Version", NOTION_VERSION)
+            .header("Content-Type", "application/json")
+            .json(&json!({ "name": name, "content_type": content_type }))
+            .send()
+            .await
+            .ok()?;
+
+        if !create_resp.status().is_success() {
+            eprintln!("Image upload slot failed ({}): {}", create_resp.status(), create_resp.text().await.unwrap_or_default());
+            return None;
+        }
+
+        let meta: Value = create_resp.json().await.ok()?;
+        let upload_url = meta["upload_url"].as_str()?.to_string();
+        let file_id    = meta["id"].as_str()?.to_string();
+
+        // Step 2 — PUT binary to the signed S3 URL (no Notion auth)
+        let put_resp = self.client
+            .put(&upload_url)
+            .header("Content-Type", content_type)
+            .body(bytes)
+            .send()
+            .await
+            .ok()?;
+
+        if !put_resp.status().is_success() {
+            eprintln!("Image PUT failed ({})", put_resp.status());
+            return None;
+        }
+
+        sleep(Duration::from_millis(340)).await;
+        Some(file_id)
     }
 }
